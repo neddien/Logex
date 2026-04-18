@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <deque>
 #include <filesystem>
+#include <functional>
 #include <future>
 #include <iostream>
 #include <list>
@@ -16,6 +17,7 @@
 #include <shared_mutex>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 #include <fmt/args.h>
 #include <fmt/chrono.h>
@@ -50,6 +52,22 @@ namespace lgx {
 
     // For shorthand.
     using enum Level;
+
+    // Parts of a log message passed to per-level format functions.
+    struct StyleArgs
+    {
+        std::string_view date;
+        std::string_view time;
+        std::string_view datetime;
+        std::string_view textdate;
+        std::string_view prefix;
+        std::string_view level;
+        std::string_view msg;
+        std::string_view format; // DefaultStyle.format — usable inside the function for layout
+    };
+
+    // Callable that receives the resolved log parts and returns the final terminal string.
+    using FormatFn = std::function<std::string(const StyleArgs&)>;
 } // namespace lgx
 
 namespace fmt {
@@ -101,7 +119,7 @@ namespace lgx {
         Level                      level;
         std::string                message;
         std::optional<std::string> prefix = std::nullopt;
-        fmt::text_style            style;
+        fmt::text_style            style;  // per-message override; only applied when no FormatFn is set
 
     public:
         [[nodiscard]] static auto FromString(const std::string_view serializedString) noexcept -> LogMsg;

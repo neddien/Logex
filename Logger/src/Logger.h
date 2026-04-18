@@ -8,18 +8,70 @@ namespace lgx {
     public:
         struct DefaultStyle
         {
-            std::string     format           = "[{datetime}] [{level}] ({prefix}): {msg}";
-            fmt::text_style defaultInfoStyle = fmt::bg(fmt::color::dark_green) | fmt::fg(fmt::color::white);
-            fmt::text_style defaultWarnStyle = fmt::bg(fmt::color::orange) | fmt::fg(fmt::color::black);
-            fmt::text_style defaultErrorStyle =
-                fmt::emphasis::italic | fmt::bg(fmt::color::red) | fmt::fg(fmt::color::white);
-            fmt::text_style defaultFatalStyle =
-                fmt::emphasis::italic | fmt::bg(fmt::color::dark_red) | fmt::fg(fmt::color::white);
-            fmt::text_style defaultDebugStyle =
-                fmt::emphasis::italic | fmt::bg(fmt::color::green) | fmt::fg(fmt::color::white);
-            fmt::text_style defaultVerboseStyle =
-                fmt::emphasis::italic | fmt::bg(fmt::color::gray) | fmt::fg(fmt::color::white);
+            // Format string used for non-terminal streams (files, stringstreams…).
+            // Also passed as StyleArgs::format so FormatFn callbacks can reuse it.
+            std::string format = "[{datetime}] [{level}] ({prefix}): {msg}";
+
+            // Strings printed for each log level in the {level} placeholder.
+            std::string infoLabel    = "Info";
+            std::string warnLabel    = "Warn";
+            std::string errorLabel   = "Error";
+            std::string fatalLabel   = "Fatal";
+            std::string debugLabel   = "Debug";
+            std::string verboseLabel = "Verbose";
+
+            // Per-level terminal format functions.
+            // Setting a field to nullptr falls back to log.style + format string.
+            FormatFn defaultInfoStyle = [](const StyleArgs& a) -> std::string {
+                return fmt::format(fmt::bg(fmt::color::dark_green) | fmt::fg(fmt::color::white),
+                                   fmt::runtime(a.format),
+                                   fmt::arg("date", a.date), fmt::arg("time", a.time),
+                                   fmt::arg("textdate", a.textdate),
+                                   fmt::arg("datetime", a.datetime), fmt::arg("level", a.level),
+                                   fmt::arg("prefix", a.prefix), fmt::arg("msg", a.msg));
+            };
+            FormatFn defaultWarnStyle = [](const StyleArgs& a) -> std::string {
+                return fmt::format(fmt::bg(fmt::color::orange) | fmt::fg(fmt::color::black),
+                                   fmt::runtime(a.format),
+                                   fmt::arg("date", a.date), fmt::arg("time", a.time),
+                                   fmt::arg("textdate", a.textdate),
+                                   fmt::arg("datetime", a.datetime), fmt::arg("level", a.level),
+                                   fmt::arg("prefix", a.prefix), fmt::arg("msg", a.msg));
+            };
+            FormatFn defaultErrorStyle = [](const StyleArgs& a) -> std::string {
+                return fmt::format(fmt::emphasis::italic | fmt::bg(fmt::color::red) | fmt::fg(fmt::color::white),
+                                   fmt::runtime(a.format),
+                                   fmt::arg("date", a.date), fmt::arg("time", a.time),
+                                   fmt::arg("textdate", a.textdate),
+                                   fmt::arg("datetime", a.datetime), fmt::arg("level", a.level),
+                                   fmt::arg("prefix", a.prefix), fmt::arg("msg", a.msg));
+            };
+            FormatFn defaultFatalStyle = [](const StyleArgs& a) -> std::string {
+                return fmt::format(fmt::emphasis::italic | fmt::bg(fmt::color::dark_red) | fmt::fg(fmt::color::white),
+                                   fmt::runtime(a.format),
+                                   fmt::arg("date", a.date), fmt::arg("time", a.time),
+                                   fmt::arg("textdate", a.textdate),
+                                   fmt::arg("datetime", a.datetime), fmt::arg("level", a.level),
+                                   fmt::arg("prefix", a.prefix), fmt::arg("msg", a.msg));
+            };
+            FormatFn defaultDebugStyle = [](const StyleArgs& a) -> std::string {
+                return fmt::format(fmt::emphasis::italic | fmt::bg(fmt::color::green) | fmt::fg(fmt::color::white),
+                                   fmt::runtime(a.format),
+                                   fmt::arg("date", a.date), fmt::arg("time", a.time),
+                                   fmt::arg("textdate", a.textdate),
+                                   fmt::arg("datetime", a.datetime), fmt::arg("level", a.level),
+                                   fmt::arg("prefix", a.prefix), fmt::arg("msg", a.msg));
+            };
+            FormatFn defaultVerboseStyle = [](const StyleArgs& a) -> std::string {
+                return fmt::format(fmt::emphasis::italic | fmt::bg(fmt::color::gray) | fmt::fg(fmt::color::white),
+                                   fmt::runtime(a.format),
+                                   fmt::arg("date", a.date), fmt::arg("time", a.time),
+                                   fmt::arg("textdate", a.textdate),
+                                   fmt::arg("datetime", a.datetime), fmt::arg("level", a.level),
+                                   fmt::arg("prefix", a.prefix), fmt::arg("msg", a.msg));
+            };
         };
+
         struct Properties
         {
             std::string                loggerName                   = "Logex";
@@ -31,343 +83,637 @@ namespace lgx {
             bool                       syslog                       = false;
             std::string                defaultPrefix                = "App";
             std::string                dateTimeFormat               = "%Y-%m-%d %H:%M:%S";
+            std::string                dateFormat                   = "%Y-%m-%d";
+            std::string                textDateFormat               = "%b %d";
+            std::string                timeFormat                   = "%H:%M:%S";
             DefaultStyle               defaultStyle                 = DefaultStyle{};
         };
 
     private:
-        Properties                      m_Properties;
-        mutable std::future<void>       m_PollThread;
-        mutable std::condition_variable m_PollCV;
-        mutable bool                    m_Run;
-        mutable std::deque<LogMsg>      m_LogQueue;
-        mutable std::mutex              m_Guard;
-
-    public:
-        [[nodiscard]] inline auto GetOutputStreams() const noexcept -> const std::vector<std::ostream*>&
+        struct State
         {
-            const std::lock_guard<std::mutex> lock{ m_Guard };
-            return m_Properties.outputStreams;
+            Properties              properties;
+            std::thread             pollThread;
+            std::condition_variable pollCV;
+            bool                    run = false;
+            std::deque<LogMsg>      logQueue;
+            std::mutex              guard;
+
+            State(Properties props) : properties(std::move(props)) {}
+            ~State()
+            {
+                {
+                    const std::lock_guard<std::mutex> lock{ guard };
+                    run = false;
+                }
+                pollCV.notify_all();
+                if (pollThread.joinable())
+                    pollThread.join();
+            }
+        };
+        std::shared_ptr<State> m_State;
+
+    private:
+        // -----------------------------------------------------------------------
+        // Getters
+        // -----------------------------------------------------------------------
+    public:
+        [[nodiscard]] inline auto GetOutputStreams() const noexcept -> const std::vector<std::ostream*>
+        {
+            if (!m_State) return {};
+            const std::lock_guard<std::mutex> lock{ m_State->guard };
+            return m_State->properties.outputStreams;
         }
         [[nodiscard]] inline auto GetDefaultPrefix() const noexcept -> std::string
         {
-            const std::lock_guard<std::mutex> lock{ m_Guard };
-            return m_Properties.defaultPrefix;
+            if (!m_State) return "";
+            const std::lock_guard<std::mutex> lock{ m_State->guard };
+            return m_State->properties.defaultPrefix;
         }
         [[nodiscard]] inline auto GetDateTimeFormat() const noexcept -> std::string
         {
-            const std::lock_guard<std::mutex> lock{ m_Guard };
-            return m_Properties.dateTimeFormat;
+            if (!m_State) return "";
+            const std::lock_guard<std::mutex> lock{ m_State->guard };
+            return m_State->properties.dateTimeFormat;
+        }
+        [[nodiscard]] inline auto GetDateFormat() const noexcept -> std::string
+        {
+            if (!m_State) return "";
+            const std::lock_guard<std::mutex> lock{ m_State->guard };
+            return m_State->properties.dateFormat;
+        }
+        [[nodiscard]] inline auto GetTextDateFormat() const noexcept -> std::string
+        {
+            if (!m_State) return "";
+            const std::lock_guard<std::mutex> lock{ m_State->guard };
+            return m_State->properties.textDateFormat;
+        }
+        [[nodiscard]] inline auto GetTimeFormat() const noexcept -> std::string
+        {
+            if (!m_State) return "";
+            const std::lock_guard<std::mutex> lock{ m_State->guard };
+            return m_State->properties.timeFormat;
         }
         [[nodiscard]] inline auto GetFormat() const noexcept -> std::string
         {
-            const std::lock_guard<std::mutex> lock{ m_Guard };
-            return m_Properties.defaultStyle.format;
+            if (!m_State) return "";
+            const std::lock_guard<std::mutex> lock{ m_State->guard };
+            return m_State->properties.defaultStyle.format;
         }
         [[nodiscard]] inline auto GetSyslog() const noexcept -> bool
         {
-            const std::lock_guard<std::mutex> lock{ m_Guard };
-            return m_Properties.syslog;
+            if (!m_State) return false;
+            const std::lock_guard<std::mutex> lock{ m_State->guard };
+            return m_State->properties.syslog;
         }
-        [[nodiscard]] inline auto GetDefaultInfoStyle() const noexcept -> fmt::text_style
+
+        // Level label getters
+        [[nodiscard]] inline auto GetInfoLabel() const noexcept -> std::string
         {
-            const std::lock_guard<std::mutex> lock{ m_Guard };
-            return m_Properties.defaultStyle.defaultInfoStyle;
+            if (!m_State) return "";
+            const std::lock_guard<std::mutex> lock{ m_State->guard };
+            return m_State->properties.defaultStyle.infoLabel;
         }
-        [[nodiscard]] inline auto GetDefaultWarnStyle() const noexcept -> fmt::text_style
+        [[nodiscard]] inline auto GetWarnLabel() const noexcept -> std::string
         {
-            const std::lock_guard<std::mutex> lock{ m_Guard };
-            return m_Properties.defaultStyle.defaultWarnStyle;
+            if (!m_State) return "";
+            const std::lock_guard<std::mutex> lock{ m_State->guard };
+            return m_State->properties.defaultStyle.warnLabel;
         }
-        [[nodiscard]] inline auto GetDefaultErrorStyle() const noexcept -> fmt::text_style
+        [[nodiscard]] inline auto GetErrorLabel() const noexcept -> std::string
         {
-            const std::lock_guard<std::mutex> lock{ m_Guard };
-            return m_Properties.defaultStyle.defaultErrorStyle;
+            if (!m_State) return "";
+            const std::lock_guard<std::mutex> lock{ m_State->guard };
+            return m_State->properties.defaultStyle.errorLabel;
         }
-        [[nodiscard]] inline auto GetDefaultFatalStyle() const noexcept -> fmt::text_style
+        [[nodiscard]] inline auto GetFatalLabel() const noexcept -> std::string
         {
-            const std::lock_guard<std::mutex> lock{ m_Guard };
-            return m_Properties.defaultStyle.defaultFatalStyle;
+            if (!m_State) return "";
+            const std::lock_guard<std::mutex> lock{ m_State->guard };
+            return m_State->properties.defaultStyle.fatalLabel;
         }
-        [[nodiscard]] inline auto GetDefaultDebugStyle() const noexcept -> fmt::text_style
+        [[nodiscard]] inline auto GetDebugLabel() const noexcept -> std::string
         {
-            const std::lock_guard<std::mutex> lock{ m_Guard };
-            return m_Properties.defaultStyle.defaultDebugStyle;
+            if (!m_State) return "";
+            const std::lock_guard<std::mutex> lock{ m_State->guard };
+            return m_State->properties.defaultStyle.debugLabel;
         }
-        [[nodiscard]] inline auto GetDefaultVerboseStyle() const noexcept -> fmt::text_style
+        [[nodiscard]] inline auto GetVerboseLabel() const noexcept -> std::string
         {
-            const std::lock_guard<std::mutex> lock{ m_Guard };
-            return m_Properties.defaultStyle.defaultVerboseStyle;
+            if (!m_State) return "";
+            const std::lock_guard<std::mutex> lock{ m_State->guard };
+            return m_State->properties.defaultStyle.verboseLabel;
         }
+
+        // FormatFn getters
+        [[nodiscard]] inline auto GetDefaultInfoStyle() const noexcept -> FormatFn
+        {
+            if (!m_State) return nullptr;
+            const std::lock_guard<std::mutex> lock{ m_State->guard };
+            return m_State->properties.defaultStyle.defaultInfoStyle;
+        }
+        [[nodiscard]] inline auto GetDefaultWarnStyle() const noexcept -> FormatFn
+        {
+            if (!m_State) return nullptr;
+            const std::lock_guard<std::mutex> lock{ m_State->guard };
+            return m_State->properties.defaultStyle.defaultWarnStyle;
+        }
+        [[nodiscard]] inline auto GetDefaultErrorStyle() const noexcept -> FormatFn
+        {
+            if (!m_State) return nullptr;
+            const std::lock_guard<std::mutex> lock{ m_State->guard };
+            return m_State->properties.defaultStyle.defaultErrorStyle;
+        }
+        [[nodiscard]] inline auto GetDefaultFatalStyle() const noexcept -> FormatFn
+        {
+            if (!m_State) return nullptr;
+            const std::lock_guard<std::mutex> lock{ m_State->guard };
+            return m_State->properties.defaultStyle.defaultFatalStyle;
+        }
+        [[nodiscard]] inline auto GetDefaultDebugStyle() const noexcept -> FormatFn
+        {
+            if (!m_State) return nullptr;
+            const std::lock_guard<std::mutex> lock{ m_State->guard };
+            return m_State->properties.defaultStyle.defaultDebugStyle;
+        }
+        [[nodiscard]] inline auto GetDefaultVerboseStyle() const noexcept -> FormatFn
+        {
+            if (!m_State) return nullptr;
+            const std::lock_guard<std::mutex> lock{ m_State->guard };
+            return m_State->properties.defaultStyle.defaultVerboseStyle;
+        }
+
+        // -----------------------------------------------------------------------
+        // Setters
+        // -----------------------------------------------------------------------
         inline auto SetOutputStreams(std::vector<std::ostream*> oss) noexcept -> void
         {
-            const std::lock_guard<std::mutex> lock{ m_Guard };
-            m_Properties.outputStreams = std::move(oss);
+            if (!m_State) return;
+            const std::lock_guard<std::mutex> lock{ m_State->guard };
+            m_State->properties.outputStreams = std::move(oss);
         }
         inline auto SetDefaultPrefix(const std::string_view newDefaultPrefix) noexcept -> void
         {
-            const std::lock_guard<std::mutex> lock{ m_Guard };
-            m_Properties.defaultPrefix = newDefaultPrefix;
+            if (!m_State) return;
+            const std::lock_guard<std::mutex> lock{ m_State->guard };
+            m_State->properties.defaultPrefix = newDefaultPrefix;
         }
-        inline auto SetDateTimeFormat(const std::string_view newDateTimeFormat) noexcept -> void
+        inline auto SetDateTimeFormat(const std::string_view fmt) noexcept -> void
         {
-            const std::lock_guard<std::mutex> lock{ m_Guard };
-            m_Properties.dateTimeFormat = newDateTimeFormat;
+            if (!m_State) return;
+            const std::lock_guard<std::mutex> lock{ m_State->guard };
+            m_State->properties.dateTimeFormat = fmt;
+        }
+        inline auto SetDateFormat(const std::string_view fmt) noexcept -> void
+        {
+            if (!m_State) return;
+            const std::lock_guard<std::mutex> lock{ m_State->guard };
+            m_State->properties.dateFormat = fmt;
+        }
+        inline auto SetTextDateFormat(const std::string_view fmt) noexcept -> void
+        {
+            if (!m_State) return;
+            const std::lock_guard<std::mutex> lock{ m_State->guard };
+            m_State->properties.textDateFormat = fmt;
+        }
+        inline auto SetTimeFormat(const std::string_view fmt) noexcept -> void
+        {
+            if (!m_State) return;
+            const std::lock_guard<std::mutex> lock{ m_State->guard };
+            m_State->properties.timeFormat = fmt;
         }
         inline auto SetFormat(const std::string_view newFormat) noexcept -> void
         {
-            const std::lock_guard<std::mutex> lock{ m_Guard };
-            m_Properties.defaultStyle.format = newFormat;
-        }
-        inline auto SetDefaultInfoStyle(const fmt::text_style& newDefaultInfoStyle) noexcept -> void
-        {
-            const std::lock_guard<std::mutex> lock{ m_Guard };
-            m_Properties.defaultStyle.defaultInfoStyle = newDefaultInfoStyle;
-        }
-        inline auto SetDefaultWarnStyle(const fmt::text_style& newDefaultWarnStyle) noexcept -> void
-        {
-            const std::lock_guard<std::mutex> lock{ m_Guard };
-            m_Properties.defaultStyle.defaultWarnStyle = newDefaultWarnStyle;
-        }
-        inline auto SetDefaultErrorStyle(const fmt::text_style& newDefaultErrorStyle) noexcept -> void
-        {
-            const std::lock_guard<std::mutex> lock{ m_Guard };
-            m_Properties.defaultStyle.defaultErrorStyle = newDefaultErrorStyle;
-        }
-        inline auto SetDefaultFatalStyle(const fmt::text_style& newDefaultFatalStyle) noexcept -> void
-        {
-            const std::lock_guard<std::mutex> lock{ m_Guard };
-            m_Properties.defaultStyle.defaultFatalStyle = newDefaultFatalStyle;
-        }
-        inline auto SetDefaultDebugStyle(const fmt::text_style& newDefaultDebugStyle) noexcept -> void
-        {
-            const std::lock_guard<std::mutex> lock{ m_Guard };
-            m_Properties.defaultStyle.defaultDebugStyle = newDefaultDebugStyle;
-        }
-        inline auto SetDefaultVerboseStyle(const fmt::text_style& newDefaultVerboseStyle) noexcept -> void
-        {
-            const std::lock_guard<std::mutex> lock{ m_Guard };
-            m_Properties.defaultStyle.defaultVerboseStyle = newDefaultVerboseStyle;
+            if (!m_State) return;
+            const std::lock_guard<std::mutex> lock{ m_State->guard };
+            m_State->properties.defaultStyle.format = newFormat;
         }
         inline auto SetVerbose(const bool enable) noexcept -> void
         {
-            const std::lock_guard<std::mutex> lock{ m_Guard };
-            m_Properties.verbose = enable;
+            if (!m_State) return;
+            const std::lock_guard<std::mutex> lock{ m_State->guard };
+            m_State->properties.verbose = enable;
         }
         inline auto SetSyslog(const bool enable) noexcept -> void
         {
-            const std::lock_guard<std::mutex> lock{ m_Guard };
-            m_Properties.syslog = enable;
+            if (!m_State) return;
+            const std::lock_guard<std::mutex> lock{ m_State->guard };
+            m_State->properties.syslog = enable;
         }
 
+        // Level label setters
+        inline auto SetInfoLabel(const std::string_view label) noexcept -> void
+        {
+            if (!m_State) return;
+            const std::lock_guard<std::mutex> lock{ m_State->guard };
+            m_State->properties.defaultStyle.infoLabel = label;
+        }
+        inline auto SetWarnLabel(const std::string_view label) noexcept -> void
+        {
+            if (!m_State) return;
+            const std::lock_guard<std::mutex> lock{ m_State->guard };
+            m_State->properties.defaultStyle.warnLabel = label;
+        }
+        inline auto SetErrorLabel(const std::string_view label) noexcept -> void
+        {
+            if (!m_State) return;
+            const std::lock_guard<std::mutex> lock{ m_State->guard };
+            m_State->properties.defaultStyle.errorLabel = label;
+        }
+        inline auto SetFatalLabel(const std::string_view label) noexcept -> void
+        {
+            if (!m_State) return;
+            const std::lock_guard<std::mutex> lock{ m_State->guard };
+            m_State->properties.defaultStyle.fatalLabel = label;
+        }
+        inline auto SetDebugLabel(const std::string_view label) noexcept -> void
+        {
+            if (!m_State) return;
+            const std::lock_guard<std::mutex> lock{ m_State->guard };
+            m_State->properties.defaultStyle.debugLabel = label;
+        }
+        inline auto SetVerboseLabel(const std::string_view label) noexcept -> void
+        {
+            if (!m_State) return;
+            const std::lock_guard<std::mutex> lock{ m_State->guard };
+            m_State->properties.defaultStyle.verboseLabel = label;
+        }
+
+        // FormatFn setters — primary API
+        inline auto SetDefaultInfoStyle(FormatFn fn) noexcept -> void
+        {
+            if (!m_State) return;
+            const std::lock_guard<std::mutex> lock{ m_State->guard };
+            m_State->properties.defaultStyle.defaultInfoStyle = std::move(fn);
+        }
+        inline auto SetDefaultWarnStyle(FormatFn fn) noexcept -> void
+        {
+            if (!m_State) return;
+            const std::lock_guard<std::mutex> lock{ m_State->guard };
+            m_State->properties.defaultStyle.defaultWarnStyle = std::move(fn);
+        }
+        inline auto SetDefaultErrorStyle(FormatFn fn) noexcept -> void
+        {
+            if (!m_State) return;
+            const std::lock_guard<std::mutex> lock{ m_State->guard };
+            m_State->properties.defaultStyle.defaultErrorStyle = std::move(fn);
+        }
+        inline auto SetDefaultFatalStyle(FormatFn fn) noexcept -> void
+        {
+            if (!m_State) return;
+            const std::lock_guard<std::mutex> lock{ m_State->guard };
+            m_State->properties.defaultStyle.defaultFatalStyle = std::move(fn);
+        }
+        inline auto SetDefaultDebugStyle(FormatFn fn) noexcept -> void
+        {
+            if (!m_State) return;
+            const std::lock_guard<std::mutex> lock{ m_State->guard };
+            m_State->properties.defaultStyle.defaultDebugStyle = std::move(fn);
+        }
+        inline auto SetDefaultVerboseStyle(FormatFn fn) noexcept -> void
+        {
+            if (!m_State) return;
+            const std::lock_guard<std::mutex> lock{ m_State->guard };
+            m_State->properties.defaultStyle.defaultVerboseStyle = std::move(fn);
+        }
+
+        // Convenience overloads
+        inline auto SetDefaultInfoStyle(const fmt::text_style& style) noexcept -> void
+        {
+            SetDefaultInfoStyle([style](const StyleArgs& a) -> std::string {
+                return fmt::format(style, fmt::runtime(a.format),
+                                   fmt::arg("date", a.date), fmt::arg("time", a.time),
+                                   fmt::arg("textdate", a.textdate),
+                                   fmt::arg("datetime", a.datetime), fmt::arg("level", a.level),
+                                   fmt::arg("prefix", a.prefix), fmt::arg("msg", a.msg));
+            });
+        }
+        inline auto SetDefaultWarnStyle(const fmt::text_style& style) noexcept -> void
+        {
+            SetDefaultWarnStyle([style](const StyleArgs& a) -> std::string {
+                return fmt::format(style, fmt::runtime(a.format),
+                                   fmt::arg("date", a.date), fmt::arg("time", a.time),
+                                   fmt::arg("textdate", a.textdate),
+                                   fmt::arg("datetime", a.datetime), fmt::arg("level", a.level),
+                                   fmt::arg("prefix", a.prefix), fmt::arg("msg", a.msg));
+            });
+        }
+        inline auto SetDefaultErrorStyle(const fmt::text_style& style) noexcept -> void
+        {
+            SetDefaultErrorStyle([style](const StyleArgs& a) -> std::string {
+                return fmt::format(style, fmt::runtime(a.format),
+                                   fmt::arg("date", a.date), fmt::arg("time", a.time),
+                                   fmt::arg("textdate", a.textdate),
+                                   fmt::arg("datetime", a.datetime), fmt::arg("level", a.level),
+                                   fmt::arg("prefix", a.prefix), fmt::arg("msg", a.msg));
+            });
+        }
+        inline auto SetDefaultFatalStyle(const fmt::text_style& style) noexcept -> void
+        {
+            SetDefaultFatalStyle([style](const StyleArgs& a) -> std::string {
+                return fmt::format(style, fmt::runtime(a.format),
+                                   fmt::arg("date", a.date), fmt::arg("time", a.time),
+                                   fmt::arg("textdate", a.textdate),
+                                   fmt::arg("datetime", a.datetime), fmt::arg("level", a.level),
+                                   fmt::arg("prefix", a.prefix), fmt::arg("msg", a.msg));
+            });
+        }
+        inline auto SetDefaultDebugStyle(const fmt::text_style& style) noexcept -> void
+        {
+            SetDefaultDebugStyle([style](const StyleArgs& a) -> std::string {
+                return fmt::format(style, fmt::runtime(a.format),
+                                   fmt::arg("date", a.date), fmt::arg("time", a.time),
+                                   fmt::arg("textdate", a.textdate),
+                                   fmt::arg("datetime", a.datetime), fmt::arg("level", a.level),
+                                   fmt::arg("prefix", a.prefix), fmt::arg("msg", a.msg));
+            });
+        }
+        inline auto SetDefaultVerboseStyle(const fmt::text_style& style) noexcept -> void
+        {
+            SetDefaultVerboseStyle([style](const StyleArgs& a) -> std::string {
+                return fmt::format(style, fmt::runtime(a.format),
+                                   fmt::arg("date", a.date), fmt::arg("time", a.time),
+                                   fmt::arg("textdate", a.textdate),
+                                   fmt::arg("datetime", a.datetime), fmt::arg("level", a.level),
+                                   fmt::arg("prefix", a.prefix), fmt::arg("msg", a.msg));
+            });
+        }
+
+        // -----------------------------------------------------------------------
+        // Constructors / lifecycle
+        // -----------------------------------------------------------------------
     public:
-        Logger() noexcept {}
-        Logger(Properties properties) noexcept
-            : m_Properties(std::move(properties))
-            , m_Run(true)
+        Logger() noexcept = default;
+        Logger(Properties properties)
+            : m_State(std::make_shared<State>(std::move(properties)))
         {
-            m_PollThread = std::async(std::launch::async, &Logger::PollLogs, this);
+            m_State->run = true;
+            m_State->pollThread = std::thread([state = m_State.get()]() {
+                PollLogs(state);
+            });
         }
-        ~Logger() noexcept
-        {
-            m_Run = false;
-            m_PollCV.notify_all();
+        ~Logger() noexcept = default;
+        Logger(const Logger& other) noexcept = default;
+        Logger(Logger&& other) noexcept = default;
+        Logger& operator=(const Logger& other) noexcept = default;
+        Logger& operator=(Logger&& other) noexcept = default;
 
-            if (m_PollThread.valid())
-                m_PollThread.get();
-        }
-        Logger(const Logger& other) noexcept = delete;
-        Logger(Logger&& other) noexcept
-        {
-            if (this != &other)
-            {
-                const std::lock_guard<std::mutex> lock1{ other.m_Guard };
-
-                m_Properties = std::move(other.m_Properties);
-                m_LogQueue   = std::move(other.m_LogQueue);
-                m_Run        = true;
-                m_PollThread = std::async(std::launch::async, &Logger::PollLogs, this);
-            }
-        }
-        Logger& operator=(Logger&& other) noexcept { return Logger{ std::move(other) }.Swap(*this); }
-
+        // -----------------------------------------------------------------------
+        // Private helpers
+        // -----------------------------------------------------------------------
     private:
-        [[nodiscard]] constexpr auto DefaultStyleFromLevel(const Level level) const noexcept -> fmt::text_style
+        [[nodiscard]] static auto FormatFnFromLevel(const Properties& props, const Level level) noexcept -> const FormatFn&
         {
             switch (level)
             {
                 using enum Level;
 
+                case Warn:    return props.defaultStyle.defaultWarnStyle;
+                case Error:   return props.defaultStyle.defaultErrorStyle;
+                case Fatal:   return props.defaultStyle.defaultFatalStyle;
+                case Debug:   return props.defaultStyle.defaultDebugStyle;
+                case Verbose: return props.defaultStyle.defaultVerboseStyle;
                 default:
-                case Info: return m_Properties.defaultStyle.defaultInfoStyle;
-                case Warn: return m_Properties.defaultStyle.defaultWarnStyle;
-                case Error: return m_Properties.defaultStyle.defaultErrorStyle;
-                case Fatal: return m_Properties.defaultStyle.defaultFatalStyle;
-                case Debug: return m_Properties.defaultStyle.defaultDebugStyle;
-                case Verbose: return m_Properties.defaultStyle.defaultVerboseStyle;
+                case Info:    return props.defaultStyle.defaultInfoStyle;
             }
         }
 
-    private:
+        [[nodiscard]] static auto LevelLabelFromLevel(const Properties& props, const Level level) noexcept -> std::string_view
+        {
+            switch (level)
+            {
+                using enum Level;
+
+                case Warn:    return props.defaultStyle.warnLabel;
+                case Error:   return props.defaultStyle.errorLabel;
+                case Fatal:   return props.defaultStyle.fatalLabel;
+                case Debug:   return props.defaultStyle.debugLabel;
+                case Verbose: return props.defaultStyle.verboseLabel;
+                default:
+                case Info:    return props.defaultStyle.infoLabel;
+            }
+        }
+
         [[nodiscard]] static constexpr auto ContainsPlaceholder(const std::string_view format,
                                                                 const std::string_view placeholder) noexcept -> bool
         {
             return format.find(placeholder) != std::string_view::npos;
         }
 
+        // -----------------------------------------------------------------------
+        // Poll thread
+        // -----------------------------------------------------------------------
     private:
-        void PollLogs()
+        static void PollLogs(State* state)
         {
-#ifdef __unix__
+        #ifdef __unix__
             {
-                const std::lock_guard<std::mutex> lock{ m_Guard };
-                if (m_Properties.syslog)
+                const std::lock_guard<std::mutex> lock{ state->guard };
+                if (state->properties.syslog)
                 {
                     int facility = LOG_USER;
-                    switch (m_Properties.appType)
+                    switch (state->properties.appType)
                     {
-                        case Type::User: facility = LOG_USER; break;
+                        case Type::User:   facility = LOG_USER;   break;
                         case Type::Daemon: facility = LOG_DAEMON; break;
                         default: break;
                     }
-                    openlog(m_Properties.loggerName.c_str(), LOG_PID | LOG_CONS, facility);
+                    openlog(state->properties.loggerName.c_str(), LOG_PID | LOG_CONS, facility);
                 }
             }
-#endif
+        #endif
 
-            while (m_Run)
+            while (true)
             {
-                std::unique_lock<std::mutex> guard{ m_Guard };
-                m_PollCV.wait(guard, [this]() { return !m_LogQueue.empty() || !m_Run; });
+                std::unique_lock<std::mutex> guard{ state->guard };
+                state->pollCV.wait(guard, [state]() { return !state->logQueue.empty() || !state->run; });
 
-                if (!m_LogQueue.empty())
+                if (state->logQueue.empty() && !state->run)
+                    break;
+
+                if (!state->logQueue.empty())
                 {
-                    auto log = m_LogQueue.front();
-                    m_LogQueue.pop_front();
-                    InternalLog(std::move(log));
+                    auto log = std::move(state->logQueue.front());
+                    state->logQueue.pop_front();
+                    guard.unlock();
+                    InternalLog(state, log);
                 }
             }
 
-#ifdef __unix__
-            if (m_Properties.syslog)
+        #ifdef __unix__
+            if (state->properties.syslog)
                 closelog();
-#endif
+        #endif
         }
 
-    private:
-        inline auto InternalLog(const LogMsg& log) const -> void
+        // -----------------------------------------------------------------------
+        // InternalLog — formats and emits one message
+        // -----------------------------------------------------------------------
+        private:
+        static auto InternalLog(State* state, const LogMsg& log) -> void
         {
-#ifndef LGX_DEBUG
+        #ifndef LGX_DEBUG
             if (log.level == Level::Debug)
                 return;
-#endif
-
-            if (log.level == Level::Verbose && !m_Properties.verbose)
+        #endif
+            Properties props;
+            {
+                const std::lock_guard<std::mutex> lock{ state->guard };
+                props = state->properties;
+            }
+            if (log.level == Level::Verbose && !props.verbose)
                 return;
 
-            // Prepare arguments conditionally based on the presence of placeholders in the format string.
-            auto arg_store = fmt::dynamic_format_arg_store<fmt::format_context>{};
+            const auto& format = props.defaultStyle.format;
+            const auto& fn     = FormatFnFromLevel(props, log.level);
 
-            if (ContainsPlaceholder(m_Properties.defaultStyle.format, "{datetime}"))
+            // Compute time parts lazily.
+            std::string datetime_str, date_str, textdate_str, time_str;
+            const bool  needs_datetime = ContainsPlaceholder(format, "{datetime}");
+            const bool  needs_date     = ContainsPlaceholder(format, "{date}");
+            const bool  needs_textdate = ContainsPlaceholder(format, "{textdate}");
+            const bool  needs_time     = ContainsPlaceholder(format, "{time}");
+
+            if (needs_datetime || needs_date || needs_textdate || needs_time || fn)
             {
-                auto time_now = std::chrono::system_clock::now();
-                auto time_obj = std::chrono::system_clock::to_time_t(time_now);
-                arg_store.push_back(
-                    fmt::arg("datetime", fmt::format(fmt::runtime("{:" + m_Properties.dateTimeFormat + '}'),
-                                                     *std::localtime(&time_obj))));
-            }
-            if (ContainsPlaceholder(m_Properties.defaultStyle.format, "{level}"))
-                arg_store.push_back(fmt::arg("level", log.level));
-            if (ContainsPlaceholder(m_Properties.defaultStyle.format, "{prefix}"))
-                arg_store.push_back(fmt::arg("prefix", log.prefix.value_or(m_Properties.defaultPrefix)));
-            if (!ContainsPlaceholder(m_Properties.defaultStyle.format, "{msg}"))
-                throw std::invalid_argument("A message is always required.");
+                const auto  time_now = std::chrono::system_clock::now();
+                const auto  time_obj = std::chrono::system_clock::to_time_t(time_now);
+                const auto* tm_ptr   = std::localtime(&time_obj);
 
-            // Always push the message argument
+                if (needs_datetime || fn)
+                    datetime_str = fmt::format(fmt::runtime("{:" + props.dateTimeFormat + '}'), *tm_ptr);
+                if (needs_date || fn)
+                    date_str = fmt::format(fmt::runtime("{:" + props.dateFormat + '}'), *tm_ptr);
+                if (needs_textdate || fn)
+                    textdate_str = fmt::format(fmt::runtime("{:" + props.textDateFormat + '}'), *tm_ptr);
+                if (needs_time || fn)
+                    time_str = fmt::format(fmt::runtime("{:" + props.timeFormat + '}'), *tm_ptr);
+            }
+
+            const auto prefix_str = log.prefix.value_or(props.defaultPrefix);
+            const auto level_str  = std::string{ LevelLabelFromLevel(props, log.level) };
+
+            // Build arg_store for format-string–based output (non-terminal / fallback).
+            auto arg_store = fmt::dynamic_format_arg_store<fmt::format_context>{};
+            if (needs_datetime)
+                arg_store.push_back(fmt::arg("datetime", datetime_str));
+            if (needs_date)
+                arg_store.push_back(fmt::arg("date", date_str));
+            if (needs_textdate)
+                arg_store.push_back(fmt::arg("textdate", textdate_str));
+            if (needs_time)
+                arg_store.push_back(fmt::arg("time", time_str));
+            if (ContainsPlaceholder(format, "{level}"))
+                arg_store.push_back(fmt::arg("level", level_str));
+            if (ContainsPlaceholder(format, "{prefix}"))
+                arg_store.push_back(fmt::arg("prefix", prefix_str));
+            if (!ContainsPlaceholder(format, "{msg}"))
+                throw std::invalid_argument("A message is always required.");
             arg_store.push_back(fmt::arg("msg", log.message));
 
-            for (const auto& stream : m_Properties.outputStreams)
+            // An explicit per-message fmt::text_style (set via Log(prefix, level, style, …))
+            // takes precedence over the per-level FormatFn.
+            const bool has_explicit_style =
+                log.style.has_foreground() || log.style.has_background() || log.style.has_emphasis();
+
+            const StyleArgs style_args{
+                .date     = date_str,
+                .time     = time_str,
+                .datetime = datetime_str,
+                .textdate = textdate_str,
+                .prefix   = prefix_str,
+                .level    = level_str,
+                .msg      = log.message,
+                .format   = format,
+            };
+
+            for (const auto& stream : props.outputStreams)
             {
                 if (stream == &std::cout)
                 {
-                    std::cout << fmt::vformat(log.style, m_Properties.defaultStyle.format, arg_store) << std::endl;
+                    if (!has_explicit_style && fn)
+                        std::cout << fn(style_args) << std::endl;
+                    else
+                        std::cout << fmt::vformat(log.style, format, arg_store) << std::endl;
                 }
                 else
                 {
-                    if (m_Properties.serializeToNonStdoutStreams)
+                    if (props.serializeToNonStdoutStreams)
                         *stream << LogMsg::ToString(log) << std::endl;
-                    else if (m_Properties.writeStyleToNonStdoutStreams)
-                        *stream << fmt::vformat(log.style, m_Properties.defaultStyle.format, arg_store) << std::endl;
+                    else if (props.writeStyleToNonStdoutStreams)
+                    {
+                        if (!has_explicit_style && fn)
+                            *stream << fn(style_args) << std::endl;
+                        else
+                            *stream << fmt::vformat(log.style, format, arg_store) << std::endl;
+                    }
                     else
-                        *stream << fmt::vformat(m_Properties.defaultStyle.format, arg_store) << std::endl;
+                        *stream << fmt::vformat(format, arg_store) << std::endl;
                 }
             }
 
-#ifdef __unix__
-            if (m_Properties.syslog)
+    #ifdef __unix__
+            if (props.syslog)
             {
                 std::string syslog_fmt = "{msg}";
+                auto        sl_args    = fmt::dynamic_format_arg_store<fmt::format_context>{};
 
-                // Prepare arguments conditionally based on the presence of placeholders in the format string.
-                auto arg_store = fmt::dynamic_format_arg_store<fmt::format_context>{};
-
-                if (ContainsPlaceholder(m_Properties.defaultStyle.format, "{prefix}"))
+                if (ContainsPlaceholder(format, "{prefix}"))
                 {
                     syslog_fmt = "[{prefix}] " + syslog_fmt;
-                    arg_store.push_back(fmt::arg("prefix", log.prefix.value_or(m_Properties.defaultPrefix)));
+                    sl_args.push_back(fmt::arg("prefix", prefix_str));
                 }
-                if (!ContainsPlaceholder(m_Properties.defaultStyle.format, "{msg}"))
+                if (!ContainsPlaceholder(format, "{msg}"))
                     throw std::invalid_argument("A message is always required.");
+                sl_args.push_back(fmt::arg("msg", log.message));
 
-                // Always push the message argument
-                arg_store.push_back(fmt::arg("msg", log.message));
-
-                int level = LOG_INFO;
+                int syslog_level = LOG_INFO;
                 switch (log.level)
                 {
                     using enum Level;
 
-                    case Info: level = LOG_INFO; break;
-                    case Warn: level = LOG_WARNING; break;
-                    case Error: level = LOG_ERR; break;
-                    case Fatal: level = LOG_ALERT; break;
+                    case Info:    syslog_level = LOG_INFO;    break;
+                    case Warn:    syslog_level = LOG_WARNING; break;
+                    case Error:   syslog_level = LOG_ERR;     break;
+                    case Fatal:   syslog_level = LOG_ALERT;   break;
                     case Debug:
-                    case Verbose: level = LOG_DEBUG; break;
+                    case Verbose: syslog_level = LOG_DEBUG;   break;
                 }
 
-                std::string strlogmsg;
-                if (m_Properties.writeStyleToNonStdoutStreams)
-                    strlogmsg = fmt::vformat(log.style, syslog_fmt, arg_store);
-                else
-                    strlogmsg = fmt::vformat(syslog_fmt, arg_store);
+                const std::string strlogmsg = props.writeStyleToNonStdoutStreams
+                    ? fmt::vformat(log.style, syslog_fmt, sl_args)
+                    : fmt::vformat(syslog_fmt, sl_args);
 
-                syslog(level, "%s", strlogmsg.c_str());
+                syslog(syslog_level, "%s", strlogmsg.c_str());
             }
-#endif
+    #endif
         }
 
+        // -----------------------------------------------------------------------
+        // Public Log / Swap
+        // -----------------------------------------------------------------------
     public:
         Logger& Swap(Logger& other) noexcept
         {
-            if (this != &other)
-            {
-                const std::lock_guard<std::mutex> lock0{ m_Guard };
-                const std::lock_guard<std::mutex> lock1{ other.m_Guard };
-
-                std::swap(m_Properties, other.m_Properties);
-                std::swap(m_Run, other.m_Run);
-                std::swap(m_LogQueue, other.m_LogQueue);
-            }
+            std::swap(m_State, other.m_State);
             return *this;
         }
+
+        // Log a pre-built LogMsg directly.
         inline auto Log(LogMsg log) const -> void
         {
-            const std::scoped_lock guard{ m_Guard };
-            m_LogQueue.push_back(std::move(log));
-            m_PollCV.notify_one();
+            if (!m_State) return;
+            const std::scoped_lock guard{ m_State->guard };
+            m_State->logQueue.push_back(std::move(log));
+            m_State->pollCV.notify_one();
         }
+
+
+        // Full control: explicit prefix, level, per-message style, format string + args.
+        // When the per-level FormatFn is set this style is ignored for terminal output.
         template <typename... TArgs>
-        constexpr auto Log(std::string prefix, const Level level, const fmt::text_style& style,
-                           const std::string_view fmt, TArgs&&... args) const -> void
+        auto Log(std::string prefix, const Level level, const fmt::text_style& style,
+                 const std::string_view fmt, TArgs&&... args) const -> void
         {
             Log(LogMsg{ .level   = level,
                         .message = fmt::format(fmt::runtime(fmt), std::forward<TArgs>(args)...),
@@ -375,29 +721,48 @@ namespace lgx {
                         .style   = style });
         }
         template <typename... TArgs>
-        constexpr auto Log(LogMsg log, const std::string_view fmt, TArgs&&... args) const -> void
+        auto Log(LogMsg log, const std::string_view fmt, TArgs&&... args) const -> void
         {
-            Log(log.prefix.value_or(m_Properties.defaultPrefix), log.level, log.style, fmt,
-                std::forward<TArgs>(args)...);
+            std::string prefix;
+            {
+                const std::lock_guard<std::mutex> lock{ m_State->guard };
+                prefix = log.prefix.value_or(m_State->properties.defaultPrefix);
+            }
+            Log(std::move(prefix), log.level, log.style, fmt, std::forward<TArgs>(args)...);
+        }
+        // Uses the per-level FormatFn (no explicit style).
+        template <typename... TArgs>
+        auto Log(const Level level, const std::string_view fmt, TArgs&&... args) const -> void
+        {
+            std::string prefix;
+            {
+                const std::lock_guard<std::mutex> lock{ m_State->guard };
+                prefix = m_State->properties.defaultPrefix;
+            }
+            Log(std::move(prefix), level, fmt::text_style{}, fmt, std::forward<TArgs>(args)...);
         }
         template <typename... TArgs>
-        constexpr auto Log(const Level level, const std::string_view fmt, TArgs&&... args) const -> void
+        auto Log(const std::string prefix, const Level level, const std::string_view fmt,
+                 TArgs&&... args) const -> void
         {
-            Log(m_Properties.defaultPrefix, level, DefaultStyleFromLevel(level), fmt, std::forward<TArgs>(args)...);
+            Log(std::move(prefix), level, fmt::text_style{}, fmt, std::forward<TArgs>(args)...);
         }
+        // Explicit per-message style with default prefix.
         template <typename... TArgs>
-        constexpr auto Log(const std::string prefix, const Level level, const std::string_view fmt,
-                           TArgs&&... args) const -> void
+        auto Log(const Level level, const fmt::text_style& style, const std::string_view fmt,
+                 TArgs&&... args) const -> void
         {
-            Log(std::move(prefix), level, DefaultStyleFromLevel(level), fmt, std::forward<TArgs>(args)...);
-        }
-        template <typename... TArgs>
-        constexpr auto Log(const Level level, const fmt::text_style& style, const std::string_view fmt,
-                           TArgs&&... args) const -> void
-        {
-            Log(m_Properties.defaultPrefix, level, style, fmt, std::forward<TArgs>(args)...);
+            std::string prefix;
+            {
+                const std::lock_guard<std::mutex> lock{ m_State->guard };
+                prefix = m_State->properties.defaultPrefix;
+            }
+            Log(std::move(prefix), level, style, fmt, std::forward<TArgs>(args)...);
         }
 
+        // -----------------------------------------------------------------------
+        // Convenience methods
+        // -----------------------------------------------------------------------
     public:
         template <typename... TArgs>
         constexpr auto Info(const std::string_view fmt, TArgs&&... args) const -> void
@@ -431,126 +796,93 @@ namespace lgx {
         }
     };
 
+    // -------------------------------------------------------------------------
+    // Global logger registry
+    // -------------------------------------------------------------------------
     [[nodiscard]] auto Get(const std::string& loggerName) -> Logger&;
 
-    [[nodiscard]] inline auto GetDefaultPrefix() noexcept
-    {
-        return Get("global").GetDefaultPrefix();
-    }
+    // -------------------------------------------------------------------------
+    // Global free functions — delegate to the "global" logger
+    // -------------------------------------------------------------------------
+    [[nodiscard]] inline auto GetDefaultPrefix() noexcept  { return Get("global").GetDefaultPrefix(); }
+    [[nodiscard]] inline auto GetDateTimeFormat() noexcept { return Get("global").GetDateTimeFormat(); }
+    [[nodiscard]] inline auto GetDateFormat() noexcept     { return Get("global").GetDateFormat(); }
+    [[nodiscard]] inline auto GetTextDateFormat() noexcept { return Get("global").GetTextDateFormat(); }
+    [[nodiscard]] inline auto GetTimeFormat() noexcept     { return Get("global").GetTimeFormat(); }
+    [[nodiscard]] inline auto GetFormat() noexcept -> std::string { return Get("global").GetFormat(); }
 
-    [[nodiscard]] inline auto GetDateTimeFormat() noexcept
-    {
-        return Get("global").GetDateTimeFormat();
-    }
+    [[nodiscard]] inline auto GetInfoLabel() noexcept    { return Get("global").GetInfoLabel(); }
+    [[nodiscard]] inline auto GetWarnLabel() noexcept    { return Get("global").GetWarnLabel(); }
+    [[nodiscard]] inline auto GetErrorLabel() noexcept   { return Get("global").GetErrorLabel(); }
+    [[nodiscard]] inline auto GetFatalLabel() noexcept   { return Get("global").GetFatalLabel(); }
+    [[nodiscard]] inline auto GetDebugLabel() noexcept   { return Get("global").GetDebugLabel(); }
+    [[nodiscard]] inline auto GetVerboseLabel() noexcept { return Get("global").GetVerboseLabel(); }
 
-    [[nodiscard]] inline auto GetFormat() noexcept -> std::string
-    {
-        return Get("global").GetFormat();
-    }
+    [[nodiscard]] inline auto GetDefaultInfoStyle() noexcept    { return Get("global").GetDefaultInfoStyle(); }
+    [[nodiscard]] inline auto GetDefaultWarnStyle() noexcept    { return Get("global").GetDefaultWarnStyle(); }
+    [[nodiscard]] inline auto GetDefaultErrorStyle() noexcept   { return Get("global").GetDefaultErrorStyle(); }
+    [[nodiscard]] inline auto GetDefaultFatalStyle() noexcept   { return Get("global").GetDefaultFatalStyle(); }
+    [[nodiscard]] inline auto GetDefaultDebugStyle() noexcept   { return Get("global").GetDefaultDebugStyle(); }
+    [[nodiscard]] inline auto GetDefaultVerboseStyle() noexcept { return Get("global").GetDefaultVerboseStyle(); }
 
-    [[nodiscard]] inline auto GetDefaultInfoStyle() noexcept
-    {
-        return Get("global").GetDefaultInfoStyle();
-    }
+    inline void SetDefaultPrefix(const std::string_view v) noexcept  { Get("global").SetDefaultPrefix(v); }
+    inline void SetDateTimeFormat(const std::string_view v) noexcept { Get("global").SetDateTimeFormat(v); }
+    inline void SetDateFormat(const std::string_view v) noexcept     { Get("global").SetDateFormat(v); }
+    inline void SetTextDateFormat(const std::string_view v) noexcept { Get("global").SetTextDateFormat(v); }
+    inline void SetTimeFormat(const std::string_view v) noexcept     { Get("global").SetTimeFormat(v); }
+    inline void SetFormat(const std::string_view v) noexcept         { Get("global").SetFormat(v); }
 
-    [[nodiscard]] inline auto GetDefaultWarnStyle() noexcept
-    {
-        return Get("global").GetDefaultWarnStyle();
-    }
+    inline void SetInfoLabel(const std::string_view v) noexcept    { Get("global").SetInfoLabel(v); }
+    inline void SetWarnLabel(const std::string_view v) noexcept    { Get("global").SetWarnLabel(v); }
+    inline void SetErrorLabel(const std::string_view v) noexcept   { Get("global").SetErrorLabel(v); }
+    inline void SetFatalLabel(const std::string_view v) noexcept   { Get("global").SetFatalLabel(v); }
+    inline void SetDebugLabel(const std::string_view v) noexcept   { Get("global").SetDebugLabel(v); }
+    inline void SetVerboseLabel(const std::string_view v) noexcept { Get("global").SetVerboseLabel(v); }
 
-    [[nodiscard]] inline auto GetDefaultErrorStyle() noexcept
-    {
-        return Get("global").GetDefaultErrorStyle();
-    }
+    // FormatFn setters
+    inline void SetDefaultInfoStyle(FormatFn fn) noexcept    { Get("global").SetDefaultInfoStyle(std::move(fn)); }
+    inline void SetDefaultWarnStyle(FormatFn fn) noexcept    { Get("global").SetDefaultWarnStyle(std::move(fn)); }
+    inline void SetDefaultErrorStyle(FormatFn fn) noexcept   { Get("global").SetDefaultErrorStyle(std::move(fn)); }
+    inline void SetDefaultFatalStyle(FormatFn fn) noexcept   { Get("global").SetDefaultFatalStyle(std::move(fn)); }
+    inline void SetDefaultDebugStyle(FormatFn fn) noexcept   { Get("global").SetDefaultDebugStyle(std::move(fn)); }
+    inline void SetDefaultVerboseStyle(FormatFn fn) noexcept { Get("global").SetDefaultVerboseStyle(std::move(fn)); }
 
-    [[nodiscard]] inline auto GetDefaultFatalStyle() noexcept
-    {
-        return Get("global").GetDefaultFatalStyle();
-    }
+    // Backward-compatible fmt::text_style overloads
+    inline void SetDefaultInfoStyle(const fmt::text_style& s) noexcept    { Get("global").SetDefaultInfoStyle(s); }
+    inline void SetDefaultWarnStyle(const fmt::text_style& s) noexcept    { Get("global").SetDefaultWarnStyle(s); }
+    inline void SetDefaultErrorStyle(const fmt::text_style& s) noexcept   { Get("global").SetDefaultErrorStyle(s); }
+    inline void SetDefaultFatalStyle(const fmt::text_style& s) noexcept   { Get("global").SetDefaultFatalStyle(s); }
+    inline void SetDefaultDebugStyle(const fmt::text_style& s) noexcept   { Get("global").SetDefaultDebugStyle(s); }
+    inline void SetDefaultVerboseStyle(const fmt::text_style& s) noexcept { Get("global").SetDefaultVerboseStyle(s); }
 
-    [[nodiscard]] inline auto GetDefaultDebugStyle() noexcept
-    {
-        return Get("global").GetDefaultDebugStyle();
-    }
-
-    inline void SetDefaultPrefix(const std::string_view newDefaultPrefix) noexcept
-    {
-        Get("global").SetDefaultPrefix(newDefaultPrefix);
-    }
-
-    inline void SetDateTimeFormat(const std::string_view newDateTimeFormat) noexcept
-    {
-        Get("global").SetDateTimeFormat(newDateTimeFormat);
-    }
-
-    inline void SetFormat(const std::string_view newFormat) noexcept
-    {
-        Get("global").SetFormat(newFormat);
-    }
-
-    inline void SetDefaultInfoStyle(const fmt::text_style& style) noexcept
-    {
-        Get("global").SetDefaultInfoStyle(style);
-    }
-
-    inline void SetDefaultWarnStyle(const fmt::text_style& style) noexcept
-    {
-        Get("global").SetDefaultWarnStyle(style);
-    }
-
-    inline void SetDefaultErrorStyle(const fmt::text_style& style) noexcept
-    {
-        Get("global").SetDefaultErrorStyle(style);
-    }
-
-    inline void SetDefaultFatalStyle(const fmt::text_style& style) noexcept
-    {
-        Get("global").SetDefaultFatalStyle(style);
-    }
-
-    inline void SetDefaultDebugStyle(const fmt::text_style& style) noexcept
-    {
-        Get("global").SetDefaultDebugStyle(style);
-    }
-
-    inline void SetDefaultVerboseStyle(const fmt::text_style& style) noexcept
-    {
-        Get("global").SetDefaultVerboseStyle(style);
-    }
-
-    inline auto Log(const LogMsg& log) -> void
-    {
-        Get("global").Log(log);
-    }
+    // Log free functions
+    inline auto Log(const LogMsg& log) -> void { Get("global").Log(log); }
 
     template <typename... TArgs>
     inline auto Log(const std::string_view prefix, const Level level, const fmt::text_style& style,
                     const std::string_view fmt, TArgs&&... args) -> void
     {
-        Get("global").Log(prefix, level, style, fmt, std::forward<TArgs>(args)...);
+        Get("global").Log(std::string{ prefix }, level, style, fmt, std::forward<TArgs>(args)...);
     }
-
     template <typename... TArgs>
     inline auto Log(const LogMsg& log, const std::string_view fmt, TArgs&&... args) -> void
     {
         Get("global").Log(log, fmt, std::forward<TArgs>(args)...);
     }
-
     template <typename... TArgs>
     inline auto Log(const Level level, const std::string_view fmt, TArgs&&... args) -> void
     {
         Get("global").Log(level, fmt, std::forward<TArgs>(args)...);
     }
-
     template <typename... TArgs>
-    inline auto Log(const std::string_view prefix, const Level level, const std::string_view fmt, TArgs&&... args)
-        -> void
+    inline auto Log(const std::string_view prefix, const Level level, const std::string_view fmt,
+                    TArgs&&... args) -> void
     {
-        Get("global").Log(prefix, level, fmt, std::forward<TArgs>(args)...);
+        Get("global").Log(std::string{ prefix }, level, fmt, std::forward<TArgs>(args)...);
     }
-
     template <typename... TArgs>
-    auto Log(const Level level, const fmt::text_style& style, const std::string_view fmt, TArgs&&... args) -> void
+    inline auto Log(const Level level, const fmt::text_style& style, const std::string_view fmt,
+                    TArgs&&... args) -> void
     {
         Get("global").Log(level, style, fmt, std::forward<TArgs>(args)...);
     }
