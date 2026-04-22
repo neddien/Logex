@@ -9,16 +9,14 @@ add_library(logex-static STATIC ${SRC_FILES} ${HDR_FILES} "src/Common.h")
 # Set the C++ Standard to 20 for this target.
 set_property(TARGET logex-static PROPERTY CXX_STANDARD 20)
 
-add_subdirectory(vendor/fmt ${PROJECT_BINARY_DIR}/fmt EXCLUDE_FROM_ALL)
-set(FMT_INCLUDE_DIR vendor/fmt/include CACHE INTERNAL "")
-set(FMT_LIBRARIES fmt CACHE INTERNAL "")
+find_package(fmt REQUIRED)
 
-target_include_directories(logex-static PUBLIC ${FMT_INCLUDE_DIR})
-target_link_libraries(logex-static ${FMT_LIBRARIES})
+target_link_libraries(logex-static fmt::fmt)
 
-# Make the base include file public
-target_include_directories(logex-static PUBLIC include/)
-target_include_directories(logex-static PUBLIC src/)
+target_include_directories(logex-static PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
+    $<INSTALL_INTERFACE:include/logex>
+)
 
 # Define the debug macro if build type is debug.
 if (CMAKE_BUILD_TYPE STREQUAL "Debug")
@@ -56,17 +54,17 @@ function(add_asan_flags target)
     endif()
 endfunction()
 
-#install(TARGETS logex-static
-#	EXPORT logexTargets
-#	ARCHIVE DESTINATION lib
-#	LIBRARY DESTINATION lib
-#	RUNTIME DESTINATION bin
-#)
-#install(DIRECTORY include/ DESTINATION include)
-#install(EXPORT logexTargets
-#	NAMESPACE logex::
-#	DESTINATION lib/cmake/logex
-#)
+install(TARGETS logex-static
+    EXPORT logexTargets
+    ARCHIVE DESTINATION lib
+    LIBRARY DESTINATION lib
+    RUNTIME DESTINATION bin
+)
+install(FILES src/Logger.h src/Common.h DESTINATION include/logex)
+install(EXPORT logexTargets
+    NAMESPACE logex::
+    DESTINATION lib/cmake/logex
+)
 
 # Quality control
 add_warning_flags(logex-static)

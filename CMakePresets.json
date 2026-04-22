@@ -1,5 +1,5 @@
 {
-    "version": 3,
+    "version": 4,
     "configurePresets": [
         {
             "name": "windows-msvc",
@@ -55,8 +55,6 @@
             "generator": "Unix Makefiles",
             "binaryDir": "${sourceDir}/builds/${presetName}",
             "cacheVariables": {
-                "CMAKE_C_COMPILER": "clang",
-                "CMAKE_CXX_COMPILER": "clang++",
                 "CMAKE_PRESET_NAME": "${presetName}",
                 "CX_ENABLE_CEDITOR": "on"
             },
@@ -87,6 +85,7 @@
             "name": "windows-msvc-any-debug",
             "displayName": "any Debug",
             "inherits": "windows-msvc",
+            "toolchainFile": "${sourceDir}/build/build/Debug/generators/conan_toolchain.cmake",
             "architecture": {
                 "value": "x64",
                 "strategy": "external"
@@ -98,7 +97,12 @@
         {
             "name": "windows-msvc-any-release",
             "displayName": "any Release",
-            "inherits": "windows-msvc-any-debug",
+            "inherits": "windows-msvc",
+            "toolchainFile": "${sourceDir}/build/build/Release/generators/conan_toolchain.cmake",
+            "architecture": {
+                "value": "x64",
+                "strategy": "external"
+            },
             "cacheVariables": {
                 "CMAKE_BUILD_TYPE": "Release",
                 "CMAKE_CXX_FLAGS": "/fsanitize=address",
@@ -108,7 +112,12 @@
         {
             "name": "windows-msvc-any-shipping",
             "displayName": "any Shipping",
-            "inherits": "windows-msvc-any-debug",
+            "inherits": "windows-msvc",
+            "toolchainFile": "${sourceDir}/build/build/Release/generators/conan_toolchain.cmake",
+            "architecture": {
+                "value": "x64",
+                "strategy": "external"
+            },
             "cacheVariables": {
                 "CMAKE_BUILD_TYPE": "Shipping"
             }
@@ -117,6 +126,7 @@
             "name": "windows-llvm-any-debug",
             "displayName": "any Debug",
             "inherits": "windows-llvm",
+            "toolchainFile": "${sourceDir}/build/build/Debug/generators/conan_toolchain.cmake",
             "architecture": {
                 "value": "x64",
                 "strategy": "external"
@@ -128,7 +138,12 @@
         {
             "name": "windows-llvm-any-release",
             "displayName": "any Release",
-            "inherits": "windows-llvm-any-debug",
+            "inherits": "windows-llvm",
+            "toolchainFile": "${sourceDir}/build/build/Release/generators/conan_toolchain.cmake",
+            "architecture": {
+                "value": "x64",
+                "strategy": "external"
+            },
             "cacheVariables": {
                 "CMAKE_BUILD_TYPE": "Release",
                 "CMAKE_CXX_FLAGS": "-fsanitize=address -fno-omit-frame-pointer -fsanitize=undefined",
@@ -138,7 +153,12 @@
         {
             "name": "windows-llvm-any-shipping",
             "displayName": "any Shipping",
-            "inherits": "windows-llvm-any-debug",
+            "inherits": "windows-llvm",
+            "toolchainFile": "${sourceDir}/build/build/Release/generators/conan_toolchain.cmake",
+            "architecture": {
+                "value": "x64",
+                "strategy": "external"
+            },
             "cacheVariables": {
                 "CMAKE_BUILD_TYPE": "Shipping"
             }
@@ -147,6 +167,7 @@
             "name": "linux-any-debug",
             "displayName": "any Debug",
             "inherits": "linux-base",
+            "toolchainFile": "${sourceDir}/builds/build/Debug/generators/conan_toolchain.cmake",
             "architecture": {
                 "value": "x64",
                 "strategy": "external"
@@ -158,7 +179,12 @@
         {
             "name": "linux-any-release",
             "displayName": "any Release",
-            "inherits": "linux-any-debug",
+            "inherits": "linux-base",
+            "toolchainFile": "${sourceDir}/builds/build/Release/generators/conan_toolchain.cmake",
+            "architecture": {
+                "value": "x64",
+                "strategy": "external"
+            },
             "cacheVariables": {
                 "CMAKE_BUILD_TYPE": "Release",
                 "CMAKE_CXX_FLAGS": "-fsanitize=address -fno-omit-frame-pointer -fsanitize=undefined",
@@ -168,7 +194,12 @@
         {
             "name": "linux-any-shipping",
             "displayName": "any Shipping",
-            "inherits": "linux-any-debug",
+            "inherits": "linux-base",
+            "toolchainFile": "${sourceDir}/builds/build/Release/generators/conan_toolchain.cmake",
+            "architecture": {
+                "value": "x64",
+                "strategy": "external"
+            },
             "cacheVariables": {
                 "CMAKE_BUILD_TYPE": "Shipping"
             }

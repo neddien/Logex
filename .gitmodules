@@ -21,6 +21,3 @@
 [submodule "CodexEditor/vendor/ImGuizmo"]
 	path = CodexEditor/vendor/ImGuizmo
 	url = https://github.com/CedricGuillemet/ImGuizmo
-[submodule "Logger/vendor/fmt"]
-	path = Logger/vendor/fmt
-	url = https://github.com/fmtlib/fmt
